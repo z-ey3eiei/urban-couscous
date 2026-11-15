@@ -1,0 +1,91 @@
+name: Deploy project to AI-SDK.PRO
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: aisdk-project-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - name: Package static files
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, json, pathlib
+          root = pathlib.Path('dist')
+          if not (root / 'index.html').is_file():
+              raise SystemExit('dist/index.html is required')
+          files = {}
+          size = 0
+          for path in sorted(root.rglob('*')):
+              if path.is_symlink():
+                  raise SystemExit('Symlinks are not supported')
+              if path.is_file():
+                  size += path.stat().st_size
+                  if size > 6_000_000 or len(files) >= 300:
+                      raise SystemExit('Build artifact is too large')
+                  files[path.relative_to(root).as_posix()] = base64.b64encode(path.read_bytes()).decode()
+          pathlib.Path('site.json').write_text(json.dumps(files, separators=(',', ':')))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aisdk-static-site
+          path: site.json
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    environment:
+      name: production
+      url: https://urban-couscous.ai-sdk.pro/
+    env:
+      SITE_URL: https://urban-couscous.ai-sdk.pro
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aisdk-static-site
+      - name: Send authenticated deploy webhook
+        shell: bash
+        run: |
+          set -euo pipefail
+          audience="$(jq -nr --arg url "$SITE_URL" '$url|@uri')"
+          token="$(curl --fail --silent --show-error --max-time 15 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}" | jq -er .value)"
+          echo "::add-mask::$token"
+          curl --fail-with-body --silent --show-error --max-time 90 \
+            -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            --data-binary @site.json "$SITE_URL/_aisdk/deploy"
+      - name: Verify published commit and homepage
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployed="$(curl -fsS --max-time 15 "$SITE_URL/_aisdk/status" | jq -er .commit)"
+          test "$deployed" = "$GITHUB_SHA"
+          curl -fsS --max-time 15 -o /dev/null "$SITE_URL/"
+          printf '[Published project](%s/) at commit `%s`\n' "$SITE_URL" "$deployed" >> "$GITHUB_STEP_SUMMARY"
