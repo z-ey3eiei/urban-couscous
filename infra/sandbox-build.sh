@@ -67,7 +67,7 @@ with tarfile.open(sys.argv[1], 'r:') as archive:
         size += entry.size
         if (not entry.isfile() or len(path) > 240 or
             not all(re.fullmatch(r'[a-zA-Z0-9_@-][a-zA-Z0-9_.@-]*', p) for p in path.split('/')) or
-            path.rsplit('.', 1)[-1] not in allowed or path in files or
+            (path != 'robots.txt' and path.rsplit('.', 1)[-1] not in allowed) or path in files or
             len(files) >= 300 or size > 6_000_000):
             raise SystemExit('Invalid or oversized static artifact')
         files[path] = base64.b64encode(archive.extractfile(entry).read()).decode()
