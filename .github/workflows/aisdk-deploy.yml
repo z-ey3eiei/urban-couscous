@@ -20,33 +20,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run build
-      - name: Package static files
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import base64, json, pathlib
-          root = pathlib.Path('dist')
-          if not (root / 'index.html').is_file():
-              raise SystemExit('dist/index.html is required')
-          files = {}
-          size = 0
-          for path in sorted(root.rglob('*')):
-              if path.is_symlink():
-                  raise SystemExit('Symlinks are not supported')
-              if path.is_file():
-                  size += path.stat().st_size
-                  if size > 6_000_000 or len(files) >= 300:
-                      raise SystemExit('Build artifact is too large')
-                  files[path.relative_to(root).as_posix()] = base64.b64encode(path.read_bytes()).decode()
-          pathlib.Path('site.json').write_text(json.dumps(files, separators=(',', ':')))
-          PY
+      - name: Build with network disabled and no inherited secrets
+        run: bash infra/sandbox-build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: aisdk-static-site
