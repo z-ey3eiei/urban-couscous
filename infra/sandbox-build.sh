@@ -22,13 +22,14 @@ for name in ('package.json', 'package-lock.json'):
 PY
 image=node:22-bookworm-slim
 docker pull "$image" >/dev/null
-sandbox=(--rm --cap-drop ALL --security-opt no-new-privileges --read-only --user "$(id -u):$(id -g)" --pids-limit 128 --memory 2g --memory-swap 2g --cpus 2 --ulimit nofile=1024:1024 --tmpfs /tmp:rw,nosuid,nodev,size=128m --tmpfs /work:rw,nosuid,nodev,size=1024m --workdir /work)
+sandbox=(--rm --cap-drop ALL --security-opt no-new-privileges --read-only --user "$(id -u):$(id -g)" --pids-limit 128 --memory 2g --memory-swap 2g --cpus 2 --ulimit nofile=1024:1024 --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=128m --tmpfs /work:rw,exec,nosuid,nodev,mode=1777,size=1024m --workdir /work)
 if ! timeout 180 docker run "${sandbox[@]}" \
     --mount "type=bind,src=$work/manifest,dst=/manifest,readonly" \
     --mount "type=bind,src=$work/cache,dst=/cache" "$image" \
     env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp CI=true npm_config_cache=/cache \
     sh -ec 'cp /manifest/* .; npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org' >"$work/prefetch.log" 2>&1; then
   echo 'Dependency prefetch failed.' >&2
+  grep -Eo "\b(EACCES|ENOSPC|EROFS|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EUSAGE|ENOTCACHED|EPERM)\b" "$work/prefetch.log" | sort -u >&2 || true
   exit 1
 fi
 if ! (ulimit -f 10000; timeout 240 docker run "${sandbox[@]}" --network none \
@@ -43,6 +44,7 @@ if ! (ulimit -f 10000; timeout 240 docker run "${sandbox[@]}" --network none \
       test -f dist/index.html
       tar --format=ustar -cf - -C dist .' >"$work/dist.tar" 2>"$work/build.log"); then
   echo 'Offline lint or build failed.' >&2
+  grep -Eo "\b(EACCES|ENOSPC|EROFS|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EUSAGE|ENOTCACHED|EPERM)\b" "$work/build.log" | sort -u >&2 || true
   exit 1
 fi
 # Read regular archive entries directly. Never extract repository-created paths.
