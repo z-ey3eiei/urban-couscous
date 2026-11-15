@@ -3,9 +3,32 @@ const json = (value, status = 200) => Response.json(value, { status, headers });
 
 export default {
   async fetch(request, env) {
-    const match = /^\/projects\/([a-z0-9-]{1,63})$/.exec(new URL(request.url).pathname);
+    const match = /^\/projects\/([a-z0-9-]{1,63})(\/upload)?$/.exec(new URL(request.url).pathname);
     if (!match) return json({ error: "not_found" }, 404);
     const id = match[1];
+    if (match[2]) {
+      const { lease } = await request.json().catch(() => ({})) ?? {};
+      if (typeof lease !== "string" || !/^[a-f0-9-]{36}$/.test(lease)) return json({ error: "invalid_lease" }, 422);
+      if (request.method === "DELETE") {
+        await env.REGISTRY.prepare("DELETE FROM upload_leases WHERE project_id=? AND lease_id=?").bind(id, lease).run();
+        return new Response(null, { status: 204 });
+      }
+      if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+      const acquire = env.REGISTRY.prepare(`
+        INSERT INTO upload_leases (project_id,lease_id,started_at)
+        SELECT id,?,unixepoch() FROM projects WHERE id=? AND enabled=1
+        AND coalesce((SELECT uploads FROM upload_usage WHERE project_id=? AND utc_day=date('now')),0)<20
+        ON CONFLICT(project_id) DO UPDATE SET lease_id=excluded.lease_id,started_at=excluded.started_at
+        WHERE upload_leases.started_at < unixepoch()-600
+      `).bind(lease,id,id);
+      const count = env.REGISTRY.prepare(`
+        INSERT INTO upload_usage (project_id,utc_day,uploads)
+        SELECT project_id,date('now'),1 FROM upload_leases WHERE project_id=? AND lease_id=?
+        ON CONFLICT(project_id,utc_day) DO UPDATE SET uploads=uploads+1
+      `).bind(id,lease);
+      const [result] = await env.REGISTRY.batch([acquire,count]);
+      return result.meta.changes === 1 ? json({ accepted: true }) : json({ error: "project_upload_limit" }, 429);
+    }
     const project = env.REGISTRY.prepare(
       "SELECT id, repository_id, repository, branch, workflow, origin, enabled, active_release, run_number, run_attempt FROM projects WHERE id = ?"
     ).bind(id);
