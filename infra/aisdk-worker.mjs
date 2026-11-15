@@ -57,17 +57,25 @@ async function deploy(request, env, project) {
     files = JSON.parse(await request.text());
     if (!files || Array.isArray(files) || typeof files !== "object" || typeof files["index.html"] !== "string") throw Error();
     const entries = Object.entries(files);
-    if (entries.length > 300 || entries.some(([path, data]) => !validPath(path) || typeof data !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(data))) throw Error();
+    if (entries.length > 300 || entries.some(([path, data]) => !validPath(path) || typeof data !== "string" || !Object.hasOwn(mime, path.split(".").at(-1)) || !/^[A-Za-z0-9+/]*={0,2}$/.test(data))) throw Error();
     files = entries.map(([path, data]) => [path, bytes(data)]);
   } catch {
     return new Response("Invalid build artifact", { status: 422 });
   }
-  const release = commit + "-" + crypto.randomUUID();
-  for (const [path, data] of files) await env.SITES.put(`releases/${release}/${path}`, data);
-  return env.PROJECTS.fetch(projectEndpoint(env), {
-    method: "POST",
-    body: JSON.stringify({ id: release, commit, run, attempt }),
-  });
+  const lease = crypto.randomUUID();
+  const uploadEndpoint = projectEndpoint(env) + "/upload";
+  const quota = await env.PROJECTS.fetch(uploadEndpoint, { method: "POST", body: JSON.stringify({ lease }) });
+  if (!quota.ok) return new Response("Project upload limit reached", { status: quota.status === 429 ? 429 : 503 });
+  const release = commit + "-" + lease;
+  try {
+    for (const [path, data] of files) await env.SITES.put(`releases/${release}/${path}`, data);
+    return await env.PROJECTS.fetch(projectEndpoint(env), {
+      method: "POST",
+      body: JSON.stringify({ id: release, commit, run, attempt }),
+    });
+  } finally {
+    await env.PROJECTS.fetch(uploadEndpoint, { method: "DELETE", body: JSON.stringify({ lease }) }).catch(() => {});
+  }
 }
 
 export default {
@@ -78,6 +86,7 @@ export default {
     const registered = await env.PROJECTS.fetch(projectEndpoint(env));
     if (!registered.ok) return new Response("Project unavailable", { status: registered.status === 404 ? 404 : 503 });
     const project = await registered.json();
+    if (!project.enabled) return new Response("Project disabled", { status: 403 });
     if (project.origin !== url.origin) return new Response("Not found", { status: 404 });
     if (url.pathname === "/_aisdk/deploy" && request.method === "POST") return deploy(request, env, project);
     if (url.pathname.startsWith("/_aisdk/")) {
