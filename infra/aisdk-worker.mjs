@@ -2,7 +2,7 @@ const issuer = "https://token.actions.githubusercontent.com";
 const projectEndpoint = env => "https://registry.internal/projects/" + env.PROJECT_ID;
 const decoder = new TextDecoder();
 const validPath = path => path.length <= 240 && path.split("/").every(part => /^[a-zA-Z0-9_@-][a-zA-Z0-9_.@-]*$/.test(part));
-const mime = { html: "text/html; charset=utf-8", css: "text/css; charset=utf-8", js: "application/javascript", mjs: "application/javascript", svg: "image/svg+xml", png: "image/png", webp: "image/webp", jpg: "image/jpeg", ico: "image/x-icon", woff2: "font/woff2", json: "application/json" };
+const mime = { html: "text/html; charset=utf-8", css: "text/css; charset=utf-8", js: "application/javascript", mjs: "application/javascript", svg: "image/svg+xml", png: "image/png", webp: "image/webp", jpg: "image/jpeg", ico: "image/x-icon", woff2: "font/woff2", json: "application/json", txt: "text/plain; charset=utf-8" };
 const bytes = value => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), char => char.charCodeAt(0));
 
 async function verifiedCommit(request, project) {
@@ -57,7 +57,7 @@ async function deploy(request, env, project) {
     files = JSON.parse(await request.text());
     if (!files || Array.isArray(files) || typeof files !== "object" || typeof files["index.html"] !== "string") throw Error();
     const entries = Object.entries(files);
-    if (entries.length > 300 || entries.some(([path, data]) => !validPath(path) || typeof data !== "string" || !Object.hasOwn(mime, path.split(".").at(-1)) || !/^[A-Za-z0-9+/]*={0,2}$/.test(data))) throw Error();
+    if (entries.length > 300 || entries.some(([path, data]) => !validPath(path) || typeof data !== "string" || (path !== "robots.txt" && (!Object.hasOwn(mime, path.split(".").at(-1)) || path.endsWith(".txt"))) || !/^[A-Za-z0-9+/]*={0,2}$/.test(data))) throw Error();
     files = entries.map(([path, data]) => [path, bytes(data)]);
   } catch {
     return new Response("Invalid build artifact", { status: 422 });
