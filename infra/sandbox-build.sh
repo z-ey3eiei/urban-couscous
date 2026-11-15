@@ -32,18 +32,24 @@ if ! timeout 180 docker run "${sandbox[@]}" \
   grep -Eo "\b(EACCES|ENOSPC|EROFS|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EUSAGE|ENOTCACHED|EPERM)\b" "$work/prefetch.log" | sort -u >&2 || true
   exit 1
 fi
-if ! (ulimit -f 10000; timeout 240 docker run "${sandbox[@]}" --network none \
+if (ulimit -f 10000; timeout 240 docker run "${sandbox[@]}" --network none \
     --mount "type=bind,src=$PWD,dst=/source,readonly" \
     --mount "type=bind,src=$work/cache,dst=/cache" \
     "$image" \
     env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp CI=true npm_config_cache=/cache \
-    sh -ec 'tar -C /source --exclude=.git --exclude=node_modules --exclude=.env --exclude=".env.*" -cf - . | tar -xf -
-      npm ci --offline --ignore-scripts --no-audit --no-fund >&2
-      npm run lint >&2
-      npm run build >&2
-      test -f dist/index.html
-      tar --format=ustar -cf - -C dist .' >"$work/dist.tar" 2>"$work/build.log"); then
-  echo 'Offline lint or build failed.' >&2
+    sh -ec 'mkdir /work/project && cd /work/project || exit 31
+      tar -C /source --exclude=.git --exclude=node_modules --exclude=.env --exclude=".env.*" -cf /work/source.tar . || exit 32
+      tar --no-overwrite-dir --no-same-owner --no-same-permissions -xf /work/source.tar || exit 33
+      rm /work/source.tar
+      npm ci --offline --ignore-scripts --no-audit --no-fund >&2 || exit 34
+      npm run lint >&2 || exit 35
+      npm run build >&2 || exit 36
+      test -f dist/index.html || exit 37
+      tar --format=ustar -cf - -C dist . || exit 38' >"$work/dist.tar" 2>"$work/build.log"); then
+  :
+else
+  status=$?
+  printf 'Offline sandbox failed (stage code %s).\n' "$status" >&2
   grep -Eo "\b(EACCES|ENOSPC|EROFS|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EUSAGE|ENOTCACHED|EPERM)\b" "$work/build.log" | sort -u >&2 || true
   exit 1
 fi
