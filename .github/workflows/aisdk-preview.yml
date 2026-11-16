@@ -1,0 +1,124 @@
+name: AI SDK static preview
+run-name: Preview ${{ inputs.slot }} · ${{ inputs.delivery }}
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        required: true
+        type: string
+      slot:
+        required: true
+        type: string
+      delivery:
+        required: true
+        type: string
+
+permissions: {}
+concurrency:
+  group: aisdk-preview-${{ inputs.slot }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - name: Verify preview inputs
+        env:
+          COMMIT: ${{ inputs.commit }}
+          SLOT: ${{ inputs.slot }}
+          DELIVERY: ${{ inputs.delivery }}
+        run: |
+          [[ "$COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$SLOT" =~ ^preview-[a-f0-9]{20}$ ]]
+          [[ "$DELIVERY" =~ ^[a-fA-F0-9-]{36}$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          path: source
+          persist-credentials: false
+      - name: Build pinned commit in the pilot sandbox
+        working-directory: source
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          bash ../control/infra/sandbox-build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-site
+          path: source/site.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: aisdk-preview
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: preview-site
+      - name: Validate and extract static assets
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, re
+          source = pathlib.Path('site.json')
+          assert source.stat().st_size <= 8_000_002
+          assets = json.loads(source.read_bytes())
+          assert isinstance(assets, dict) and 'index.html' in assets and len(assets) <= 300
+          output = pathlib.Path('preview-assets')
+          output.mkdir()
+          allowed = {'html', 'css', 'js', 'mjs', 'json', 'svg', 'png', 'jpg', 'jpeg', 'webp', 'ico', 'woff2'}
+          total = 0
+          for name, encoded in assets.items():
+              assert isinstance(encoded, str) and len(name) <= 240
+              assert all(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.@-]*', part) for part in name.split('/'))
+              assert name == 'robots.txt' or name.rsplit('.', 1)[-1] in allowed
+              data = base64.b64decode(encoded, validate=True)
+              total += len(data)
+              assert total <= 6_000_000
+              target = output / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+          (output / '_aisdk-commit.json').write_text(json.dumps({'commit': os.environ['COMMIT']}))
+          PY
+      - name: Publish and verify preview
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          SLOT: ${{ inputs.slot }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$PAGES_PROJECT" =~ ^[a-z0-9][a-z0-9-]{1,57}$ ]]
+          [[ "$SLOT" =~ ^preview-[a-f0-9]{20}$ ]]
+          : "${CLOUDFLARE_API_TOKEN:?Configure the preview publisher credential}"
+          npx --yes wrangler@4.162.0 pages deploy preview-assets \
+            --project-name "$PAGES_PROJECT" --branch "$SLOT" --commit-hash "$COMMIT"
+          url="https://$SLOT.$PAGES_PROJECT.pages.dev"
+          for attempt in $(seq 1 15); do
+            actual="$(curl -fsS --max-time 8 "$url/_aisdk-commit.json" | jq -r .commit || true)"
+            if [[ "$actual" == "$COMMIT" ]]; then
+              curl -fsS --max-time 8 -o /dev/null "$url/"
+              printf '[Preview](%s/) · `%s`\n' "$url" "$COMMIT" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo 'Preview URL did not serve the expected commit.' >&2
+          exit 1
