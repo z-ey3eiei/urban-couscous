@@ -45,6 +45,19 @@ jobs:
               exit 0
             fi
             if [[ "$code" != 400 && "$code" != 503 ]]; then
+              if [[ "$code" == 401 ]]; then
+                OIDC_DIAGNOSTIC="$token" python3 - <<'PY'
+          import os,base64,json,time
+          token=os.environ['OIDC_DIAGNOSTIC']
+          enc=token.split('.')[1]
+          c=json.loads(base64.urlsafe_b64decode(enc+'='*((-len(enc))%4)))
+          repo='z-ey3eiei/urban-couscous'
+          ref='refs/heads/aisdk/preview-pilot'
+          expect={'iss':'https://token.actions.githubusercontent.com','aud':'https://staging.ai-sdk.pro/api/github/webhook','sub':f'repo:{repo}:ref:{ref}','repository':repo,'repository_id':'1458143895','event_name':'push','ref':ref,'workflow_ref':f'{repo}/.github/workflows/aisdk-preview.yml@{ref}'}
+          print('OIDC claim checks:',json.dumps({**{k:c.get(k)==v for k,v in expect.items()},'workflow_sha_matches':c.get('workflow_sha')==c.get('sha'),'has_iat':isinstance(c.get('iat'),int),'has_nbf':isinstance(c.get('nbf'),int),'valid_lifetime':0<c.get('exp',0)-time.time()<=600}))
+          PY
+                jq -c '{error}' "$RUNNER_TEMP/intake.json"
+              fi
               echo "Staging intake returned HTTP $code without confirming a new job."
               exit 1
             fi
